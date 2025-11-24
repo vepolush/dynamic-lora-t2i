@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import logging
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -27,6 +27,8 @@ STREAMLIT_APP_DIR = SRC_DIR / "streamlit_app"
 
 TESTS_DIR = PROJECT_ROOT / "tests"
 
+LOGS_DIR = PROJECT_ROOT / "logs"
+
 
 def ensure_project_directories() -> None:
     """
@@ -47,6 +49,7 @@ def ensure_project_directories() -> None:
         FIGURES_DIR,
         STREAMLIT_APP_DIR,
         TESTS_DIR,
+        LOGS_DIR,
     ]:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -101,3 +104,24 @@ def get_torch_dtype():
         return torch.float16
 
     return torch.float32
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """
+    Configure basic logging for the project (console + file).
+    """
+    ensure_project_directories()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOGS_DIR / "app.log"
+
+    if logging.getLogger().handlers:
+        return
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+    )
