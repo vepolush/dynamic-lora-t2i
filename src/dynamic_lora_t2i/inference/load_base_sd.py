@@ -1,4 +1,5 @@
 from __future__ import annotations
+import random
 import torch
 from diffusers import StableDiffusionPipeline
 from src.dynamic_lora_t2i.config import (
@@ -42,36 +43,69 @@ def load_base_sd_pipeline_cpu_fp32(model_id: str = DEFAULT_BASE_MODEL_ID) -> Sta
     return pipe
 
 
-def generate_test_image_cpu(pipe: StableDiffusionPipeline) -> None:
+def generate_image_cpu(
+    pipe: StableDiffusionPipeline,
+    prompt: str,
+    negative_prompt: str | None = None,
+    num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
+    guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
+    seed: int | None = None,
+):
     """
-    Generates one test image per CPU and saves it in experiments/results/
+    Generates one image
     """
     ensure_project_directories()
 
-    prompt = "a cute cat reading a book, cinematic lighting, 4k, highly detailed"
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
 
-    print("[INFO] Generating test image on CPU...")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    print(f"[INFO] Using seed={seed}")
+
+    print("[INFO] Generating image on CPU...")
+    print(f"[INFO] prompt={prompt!r}")
+    if negative_prompt:
+        print(f"[INFO] negative_prompt={negative_prompt!r}")
+    print(f"[INFO] steps={num_inference_steps}, guidance_scale={guidance_scale}")
 
     with torch.no_grad():
         result = pipe(
             prompt=prompt,
+            negative_prompt=negative_prompt,
             width=DEFAULT_IMAGE_WIDTH,
             height=DEFAULT_IMAGE_HEIGHT,
-            num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
-            guidance_scale=DEFAULT_GUIDANCE_SCALE,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
         )
 
     image = result.images[0]
+    return image
+
+
+def generate_test_image_cpu(pipe: StableDiffusionPipeline) -> None:
+    """
+    Generates one test image on CPU and saves it in experiments/results/
+    """
+    ensure_project_directories()
+
+    prompt = "a cute cat reading a book, cinematic lighting, 4k, highly detailed"
+    negative_prompt = "bad quality, blurriness"
+    out_path = EXPERIMENT_RESULTS_DIR / "sd15_base_sanity_check.png"
+
+    image = generate_image_cpu(
+        pipe=pipe,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=None
+    )
 
     import numpy as np
-
     arr = np.array(image)
     print(f"[DEBUG] image pixel range: min={arr.min()}, max={arr.max()}")
 
     EXPERIMENT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = EXPERIMENT_RESULTS_DIR / "sd15_base_sanity_check.png"
     image.save(out_path)
-
     print(f"[INFO] Test image saved to: {out_path}")
 
 
