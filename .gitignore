@@ -3,6 +3,9 @@
 .venv/
 *.pyc
 
+# user uploaded entities
+data/entities/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

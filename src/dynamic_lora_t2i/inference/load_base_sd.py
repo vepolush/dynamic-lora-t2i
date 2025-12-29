@@ -1,12 +1,18 @@
+# src/dynamic_lora_t2i/inference/load_base_sd.py
+
 from __future__ import annotations
+
 import json
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Protocol, runtime_checkable
+
 import torch
-from diffusers import StableDiffusionPipeline
+from diffusers import AutoPipelineForText2Image, DiffusionPipeline
+from PIL import Image
+
 from src.dynamic_lora_t2i.config import (
     DEFAULT_BASE_MODEL_ID,
     DEFAULT_IMAGE_WIDTH,
@@ -18,37 +24,64 @@ from src.dynamic_lora_t2i.config import (
     setup_logging,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
-def load_base_sd_pipeline_cpu_fp32(model_id: str = DEFAULT_BASE_MODEL_ID) -> StableDiffusionPipeline:
-    """Loads Stable Diffusion 1.5 on the CPU in float32."""
-    device = "cpu"
-    torch_dtype = torch.float32
+@runtime_checkable
+class Text2ImagePipeline(Protocol):
+    device: torch.device
 
-    logger.info("Loading Stable Diffusion 1.5 base model")
-    logger.info("torch version: %s", torch.__version__)
-    try:
-        import diffusers
+    def __call__(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: Optional[str] = None,
+        width: int,
+        height: int,
+        num_inference_steps: int,
+        guidance_scale: float,
+        generator: torch.Generator,
+    ) -> Any: ...
 
-        logger.info("diffusers version: %s", diffusers.__version__)
-    except Exception as exc:
-        logger.warning("Cannot import diffusers to print version: %s", exc)
 
+def _pick_device_and_dtype() -> tuple[str, torch.dtype]:
+    if torch.backends.mps.is_available():
+        return "mps", torch.float16
+    return "cpu", torch.float32
+
+
+def load_base_pipeline_cpu_fp32(model_id: str = DEFAULT_BASE_MODEL_ID) -> DiffusionPipeline:
+    device, dtype = _pick_device_and_dtype()
+
+    logger.info("Loading base model via AutoPipelineForText2Image")
     logger.info("Model id: %s", model_id)
-    logger.info("Device: %s, dtype: %s", device, torch_dtype)
+    logger.info("Device: %s, dtype: %s", device, dtype)
 
-    pipe = StableDiffusionPipeline.from_pretrained(
-        model_id,
-        torch_dtype=torch_dtype,
-        use_safetensors=True,
-        safety_checker=None,
-    )
-    pipe.model_id = model_id
+    try:
+        pipe: DiffusionPipeline = AutoPipelineForText2Image.from_pretrained(
+            model_id,
+            dtype=dtype,
+            use_safetensors=True,
+        )
+    except TypeError:
+        pipe = AutoPipelineForText2Image.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+        )
+
+    setattr(pipe, "model_id", model_id)
+
+    if hasattr(pipe, "safety_checker"):
+        setattr(pipe, "safety_checker", None)
+    if hasattr(pipe, "requires_safety_checker"):
+        setattr(pipe, "requires_safety_checker", False)
 
     pipe = pipe.to(device)
     pipe.enable_attention_slicing()
+
+    if device == "mps" and hasattr(pipe, "vae") and getattr(pipe, "vae") is not None:
+        pipe.vae.to(dtype=torch.float32)
 
     logger.info("Pipeline loaded and moved to %s", device)
     return pipe
@@ -56,7 +89,7 @@ def load_base_sd_pipeline_cpu_fp32(model_id: str = DEFAULT_BASE_MODEL_ID) -> Sta
 
 def _save_generation_metadata(
     metadata_path: Path,
-    pipe: StableDiffusionPipeline,
+    pipe: Text2ImagePipeline,
     prompt: str,
     negative_prompt: str | None,
     num_inference_steps: int,
@@ -66,11 +99,20 @@ def _save_generation_metadata(
     height: int,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """
-    Save parameters of a single generation run to JSON.
-    """
+
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    model_id = getattr(pipe, "model_id", None)
+
+    device_obj = getattr(pipe, "device", None)
+    device_str = str(device_obj) if device_obj is not None else None
+
+    unet = getattr(pipe, "unet", None)
+    unet_dtype = getattr(unet, "dtype", None) if unet is not None else None
+    dtype_str = str(unet_dtype) if unet_dtype is not None else None
+
     metadata: dict[str, Any] = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": timestamp,
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "num_inference_steps": num_inference_steps,
@@ -78,18 +120,10 @@ def _save_generation_metadata(
         "seed": seed,
         "width": width,
         "height": height,
-        "model_id": getattr(pipe, "model_id", None),
+        "model_id": model_id,
+        "device": device_str,
+        "dtype": dtype_str,
     }
-
-    try:
-        metadata["device"] = str(pipe.device)
-    except Exception:
-        metadata["device"] = None
-
-    try:
-        metadata["dtype"] = str(pipe.unet.dtype)
-    except Exception:
-        metadata["dtype"] = None
 
     if extra:
         metadata.update(extra)
@@ -102,24 +136,22 @@ def _save_generation_metadata(
 
 
 def generate_image_cpu(
-    pipe: StableDiffusionPipeline,
+    pipe: Text2ImagePipeline,
     prompt: str,
     negative_prompt: str | None = None,
     num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
     guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
     seed: int | None = None,
     metadata_path: Path | None = None,
-):
-    """
-    Generates one image on CPU (float32).
-    """
+) -> Image.Image:
     ensure_project_directories()
 
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    logger.info("Generating image on CPU...")
+    generator = torch.Generator(device=str(pipe.device)).manual_seed(seed)
+
+    logger.info("Generating image...")
     logger.info("seed=%d", seed)
     logger.info("prompt=%r", prompt)
     if negative_prompt:
@@ -137,7 +169,7 @@ def generate_image_cpu(
             generator=generator,
         )
 
-    image = result.images[0]
+    image: Image.Image = result.images[0]
 
     if metadata_path is not None:
         _save_generation_metadata(
@@ -150,21 +182,17 @@ def generate_image_cpu(
             seed=seed,
             width=DEFAULT_IMAGE_WIDTH,
             height=DEFAULT_IMAGE_HEIGHT,
-            extra=None,
         )
 
     return image
 
 
-def generate_test_image_cpu(pipe: StableDiffusionPipeline) -> None:
-    """
-    Generates one test image on CPU and saves it in experiments/results/.
-    """
+def generate_test_image_cpu(pipe: Text2ImagePipeline) -> None:
     ensure_project_directories()
 
-    prompt = "a cute cat reading a book, cinematic lighting, 4k, highly detailed"
+    prompt = "20 year old guy with tattoos"
     negative_prompt = "bad quality, blurriness"
-    out_path = EXPERIMENT_RESULTS_DIR / "sd15_base_sanity_check.png"
+    out_path = EXPERIMENT_RESULTS_DIR / "test_picture.png"
     metadata_path = out_path.with_suffix(".json")
 
     image = generate_image_cpu(
@@ -175,10 +203,13 @@ def generate_test_image_cpu(pipe: StableDiffusionPipeline) -> None:
         metadata_path=metadata_path,
     )
 
-    import numpy as np
+    try:
+        import numpy as np
 
-    arr = np.array(image)
-    logger.debug("image pixel range: min=%s, max=%s", arr.min(), arr.max())
+        arr = np.array(image)
+        logger.debug("image pixel range: min=%s, max=%s", arr.min(), arr.max())
+    except ImportError:
+        logger.debug("numpy is not installed; skipping pixel range debug")
 
     EXPERIMENT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     image.save(out_path)
@@ -187,7 +218,7 @@ def generate_test_image_cpu(pipe: StableDiffusionPipeline) -> None:
 
 def main() -> None:
     setup_logging()
-    pipe = load_base_sd_pipeline_cpu_fp32()
+    pipe = load_base_pipeline_cpu_fp32()
     generate_test_image_cpu(pipe)
 
 

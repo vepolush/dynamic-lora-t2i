@@ -1,3 +1,5 @@
+# src/dynamic_lora_t2i/utils/config.py
+
 from pathlib import Path
 import logging
 
@@ -9,6 +11,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
+
+ENTITIES_DIR = DATA_DIR / "entities"
 
 EXPERIMENTS_DIR = PROJECT_ROOT / "experiments"
 EXPERIMENT_CONFIGS_DIR = EXPERIMENTS_DIR / "configs"
@@ -31,13 +35,11 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 
 
 def ensure_project_directories() -> None:
-    """
-    Create all main directories, if they do not exist. Can be called once at the start of the program/training.
-    """
     for path in [
         DATA_DIR,
         RAW_DATA_DIR,
         PROCESSED_DATA_DIR,
+        ENTITIES_DIR,
         EXPERIMENTS_DIR,
         EXPERIMENT_CONFIGS_DIR,
         EXPERIMENT_RESULTS_DIR,
@@ -54,7 +56,8 @@ def ensure_project_directories() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-DEFAULT_BASE_MODEL_ID = "runwayml/stable-diffusion-v1-5"
+# DEFAULT_BASE_MODEL_ID = "runwayml/stable-diffusion-v1-5"
+DEFAULT_BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 
 DEFAULT_REFINER_MODEL_ID = None
 
@@ -70,8 +73,8 @@ DEFAULT_GRADIENT_ACCUM_STEPS = 1
 DEFAULT_LEARNING_RATE = 1e-4
 DEFAULT_WARMUP_STEPS = 0
 
-DEFAULT_IMAGE_WIDTH = 512
-DEFAULT_IMAGE_HEIGHT = 512
+DEFAULT_IMAGE_WIDTH = 1024
+DEFAULT_IMAGE_HEIGHT = 1024
 
 DEFAULT_NUM_INFERENCE_STEPS = 20
 DEFAULT_GUIDANCE_SCALE = 7.5
