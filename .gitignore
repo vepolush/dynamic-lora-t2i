@@ -6,6 +6,9 @@
 # user uploaded entities
 data/entities/
 
+# experiments
+experiments
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
