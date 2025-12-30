@@ -9,6 +9,9 @@ data/entities/
 # experiments
 experiments
 
+# entities
+lora_adapters/user_entities
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
