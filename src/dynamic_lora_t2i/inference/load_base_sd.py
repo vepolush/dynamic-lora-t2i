@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
 import torch
-from diffusers import AutoPipelineForText2Image, DiffusionPipeline
+from diffusers import AutoPipelineForText2Image, DiffusionPipeline, DPMSolverMultistepScheduler
 from PIL import Image
 
 try:
@@ -207,6 +207,43 @@ def load_base_pipeline(
         )
 
     setattr(pipe, "model_id", model_id)
+
+    if hasattr(pipe, "safety_checker"):
+        try:
+            setattr(pipe, "safety_checker", None)
+        except Exception:
+            pass
+    if hasattr(pipe, "requires_safety_checker"):
+        try:
+            setattr(pipe, "requires_safety_checker", False)
+        except Exception:
+            pass
+
+    pipe = pipe.to(device)
+
+    try:
+        pipe: DiffusionPipeline = AutoPipelineForText2Image.from_pretrained(
+            model_id,
+            dtype=dtype,
+            **load_kwargs,
+        )
+    except TypeError:
+        pipe = AutoPipelineForText2Image.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            **load_kwargs,
+        )
+
+    setattr(pipe, "model_id", model_id)
+
+    try:
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=True,
+        )
+        logger.info("Scheduler set: DPMSolverMultistepScheduler (karras sigmas)")
+    except Exception as e:
+        logger.warning("Could not set DPMSolverMultistepScheduler: %s", e)
 
     if hasattr(pipe, "safety_checker"):
         try:
@@ -424,8 +461,8 @@ def generate_image_cpu(
 def generate_test_image(pipe: Text2ImagePipeline) -> None:
     ensure_project_directories()
 
-    prompt = "20 year old guy with tattoos"
-    negative_prompt = "bad quality, blurriness"
+    prompt = "portrait photo of a 20-year-old man with visible tattoos, sharp focus, high detail, realistic skin texture, studio lighting, 35mm photo, natural colors, ultra detailed"
+    negative_prompt = "worst quality, low quality, blurry, out of focus, jpeg artifacts, watermark, text, logo, deformed, disfigured, bad anatomy, bad hands, extra fingers, missing fingers, mutated hands, cross-eye, poorly drawn face"
     out_path = EXPERIMENT_RESULTS_DIR / "test_picture.png"
     metadata_path = out_path.with_suffix(".json")
 
