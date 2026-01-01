@@ -128,7 +128,7 @@ class BlipCaptioner:
 
         self.processor = BlipProcessor.from_pretrained(model_id, cache_dir=self.cache_dir)
 
-        model_kwargs = {"cache_dir": self.cache_dir}
+        model_kwargs = {"cache_dir": self.cache_dir, "use_safetensors": True}
         if self.device_str == "cuda":
             model_kwargs["torch_dtype"] = self.dtype
             model_kwargs["low_cpu_mem_usage"] = True
