@@ -10,16 +10,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from src.dynamic_lora_t2i.config import (
-    DEFAULT_BASE_MODEL_ID,
-    DEFAULT_REFINER_MODEL_ID,
-    DEFAULT_LORA_ALPHA,
-    DEFAULT_LORA_DROPOUT,
-    DEFAULT_LORA_RANK,
-    ENTITIES_DIR,
-    LORA_USER_ENTITIES_DIR,
-    ensure_project_directories,
-)
+try:
+    from src.dynamic_lora_t2i.config import (
+        DEFAULT_BASE_MODEL_ID,
+        DEFAULT_REFINER_MODEL_ID,
+        DEFAULT_LORA_ALPHA,
+        DEFAULT_LORA_DROPOUT,
+        DEFAULT_LORA_RANK,
+        ENTITIES_DIR,
+        LORA_USER_ENTITIES_DIR,
+        ensure_project_directories,
+        setup_logging,
+        get_device,
+    )
+except Exception:
+    from src.dynamic_lora_t2i.utils.config import (  # type: ignore
+        DEFAULT_BASE_MODEL_ID,
+        DEFAULT_REFINER_MODEL_ID,
+        DEFAULT_LORA_ALPHA,
+        DEFAULT_LORA_DROPOUT,
+        DEFAULT_LORA_RANK,
+        ENTITIES_DIR,
+        LORA_USER_ENTITIES_DIR,
+        ensure_project_directories,
+        setup_logging,
+        get_device,
+    )
+
 from src.dynamic_lora_t2i.utils.entity_zip import sanitize_entity_name
 
 logger = logging.getLogger(__name__)
@@ -55,7 +72,6 @@ def _validate_placeholder_token(token: str) -> None:
     if " " in token:
         raise ValueError("placeholder_token must not contain spaces")
 
-    # Для простоти: дозволимо [a-zA-Z0-9_-]
     if not re.fullmatch(r"[A-Za-z0-9_\-]+", token):
         raise ValueError("placeholder_token must match: [A-Za-z0-9_-]+")
 
@@ -72,23 +88,11 @@ class EntityLoRAConfig:
     alpha: int = DEFAULT_LORA_ALPHA
     dropout: float = DEFAULT_LORA_DROPOUT
 
-    # Якщо захочеш SDXL-специфіку: наприклад ["to_k", "to_q", "to_v", "to_out.0"]
     target_modules: Optional[list[str]] = None
 
 
 @dataclass
 class EntityConfig:
-    """
-    Entity-level config (стійкий, довгоживучий):
-      - хто така сутність (name/description/token)
-      - де лежать дані
-      - під яку базову модель тренуємо
-      - базові LoRA параметри (rank/alpha/dropout/target_modules)
-      - де складати LoRA-адаптери цієї сутності
-
-    Це НЕ “run config”. Run-конфіг (epochs/lr/etc) лишаємо в TrainConfig.
-    """
-
     schema_version: int = 1
 
     name: str = "my_entity"
@@ -99,10 +103,8 @@ class EntityConfig:
     created_at: str = field(default_factory=_utc_now_z)
     updated_at: str = field(default_factory=_utc_now_z)
 
-    # Де лежить сутність (за замовчуванням data/entities/<name>)
     entity_dir: Optional[Path] = None
 
-    # Де зберігати треновані адаптери (за замовчуванням lora_adapters/user_entities/<name>/)
     adapters_dir: Optional[Path] = None
 
     captions_ext: str = ".txt"
@@ -120,17 +122,17 @@ class EntityConfig:
         self.name = safe
 
         if self.entity_dir is None:
-            self.entity_dir = (ENTITIES_DIR / safe).resolve()
+            self.entity_dir = (Path(ENTITIES_DIR) / safe).resolve()
 
         if self.adapters_dir is None:
-            self.adapters_dir = (LORA_USER_ENTITIES_DIR / safe).resolve()
+            self.adapters_dir = (Path(LORA_USER_ENTITIES_DIR) / safe).resolve()
+
+        self.meta.setdefault("device_hint", get_device())
+        self.meta.setdefault("updated_by", "entity_config.py")
 
         return self
 
     def config_path(self) -> Path:
-        """
-        Де зберігаємо entity_config.json (всередині entity_dir).
-        """
         self.resolve_paths()
         assert self.entity_dir is not None
         return Path(self.entity_dir) / "entity_config.json"
@@ -165,13 +167,11 @@ class EntityConfig:
             if not Path(self.entity_dir).exists():
                 raise FileNotFoundError(f"entity_dir not found: {self.entity_dir}")
 
-            # Перевірка, що є хоч 1 зображення
-            img_count = 0
+            allowed = {e.lower() for e in self.image_exts}
             for p in Path(self.entity_dir).rglob("*"):
-                if p.is_file() and p.suffix.lower() in {e.lower() for e in self.image_exts}:
-                    img_count += 1
+                if p.is_file() and p.suffix.lower() in allowed:
                     break
-            if img_count == 0:
+            else:
                 raise ValueError(f"No images found in entity_dir: {self.entity_dir}")
 
     def to_dict(self) -> dict[str, Any]:
@@ -260,13 +260,7 @@ def init_entity_config(
 
 
 def main() -> None:
-    """
-    Usage:
-      python -m src.dynamic_lora_t2i.entities.entity_config init --entity my_entity --token vlad_object --desc "..."
-      python -m src.dynamic_lora_t2i.entities.entity_config check --entity my_entity
-    """
     import argparse
-    from src.dynamic_lora_t2i.config import setup_logging
 
     setup_logging()
 
@@ -296,9 +290,8 @@ def main() -> None:
 
     elif args.cmd == "check":
         safe = sanitize_entity_name(args.entity)
-        path = (ENTITIES_DIR / safe / "entity_config.json").resolve()
+        path = (Path(ENTITIES_DIR) / safe / "entity_config.json").resolve()
         cfg = EntityConfig.load(path, resolve_paths=True, validate=True)
-        # strict=True якщо хочеш вимагати наявність зображень
         cfg.validate(strict=False)
         print("OK: entity config is valid")
         print(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2))

@@ -4,34 +4,78 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from src.dynamic_lora_t2i.config import (
-    DEFAULT_BASE_MODEL_ID,
-    DEFAULT_REFINER_MODEL_ID,
-    USE_FP16,
-    DEFAULT_LORA_RANK,
-    DEFAULT_LORA_ALPHA,
-    DEFAULT_LORA_DROPOUT,
-    DEFAULT_NUM_EPOCHS,
-    DEFAULT_TRAIN_BATCH_SIZE,
-    DEFAULT_GRADIENT_ACCUM_STEPS,
-    DEFAULT_LEARNING_RATE,
-    DEFAULT_WARMUP_STEPS,
-    DEFAULT_IMAGE_WIDTH,
-    DEFAULT_IMAGE_HEIGHT,
-    ENTITIES_DIR,
-    LORA_USER_ENTITIES_DIR,
-    EXPERIMENT_RESULTS_DIR,
-    LOGS_DIR,
-    ensure_project_directories,
-)
+try:
+    from src.dynamic_lora_t2i.config import (
+        DEFAULT_BASE_MODEL_ID,
+        DEFAULT_REFINER_MODEL_ID,
+        USE_FP16,
+        DEFAULT_LORA_RANK,
+        DEFAULT_LORA_ALPHA,
+        DEFAULT_LORA_DROPOUT,
+        DEFAULT_NUM_EPOCHS,
+        DEFAULT_TRAIN_BATCH_SIZE,
+        DEFAULT_GRADIENT_ACCUM_STEPS,
+        DEFAULT_LEARNING_RATE,
+        DEFAULT_WARMUP_STEPS,
+        DEFAULT_IMAGE_WIDTH,
+        DEFAULT_IMAGE_HEIGHT,
+        ENTITIES_DIR,
+        LORA_USER_ENTITIES_DIR,
+        EXPERIMENT_RESULTS_DIR,
+        LOGS_DIR,
+        ensure_project_directories,
+        get_device,
+    )
+
+    try:
+        from src.dynamic_lora_t2i.config import HF_HOME as _HF_HOME, DIFFUSERS_CACHE as _DIFFUSERS_CACHE
+    except Exception:
+        _HF_HOME = None
+        _DIFFUSERS_CACHE = None
+
+except Exception:
+    from src.dynamic_lora_t2i.utils.config import (  # type: ignore
+        DEFAULT_BASE_MODEL_ID,
+        DEFAULT_REFINER_MODEL_ID,
+        USE_FP16,
+        DEFAULT_LORA_RANK,
+        DEFAULT_LORA_ALPHA,
+        DEFAULT_LORA_DROPOUT,
+        DEFAULT_NUM_EPOCHS,
+        DEFAULT_TRAIN_BATCH_SIZE,
+        DEFAULT_GRADIENT_ACCUM_STEPS,
+        DEFAULT_LEARNING_RATE,
+        DEFAULT_WARMUP_STEPS,
+        DEFAULT_IMAGE_WIDTH,
+        DEFAULT_IMAGE_HEIGHT,
+        ENTITIES_DIR,
+        LORA_USER_ENTITIES_DIR,
+        EXPERIMENT_RESULTS_DIR,
+        LOGS_DIR,
+        ensure_project_directories,
+        get_device,
+    )
+
+    try:
+        from src.dynamic_lora_t2i.utils.config import HF_HOME as _HF_HOME, DIFFUSERS_CACHE as _DIFFUSERS_CACHE  # type: ignore
+    except Exception:  # pragma: no cover
+        _HF_HOME = None
+        _DIFFUSERS_CACHE = None
 
 from src.dynamic_lora_t2i.utils.entity_zip import sanitize_entity_name
 
 logger = logging.getLogger(__name__)
+
+
+def _default_mixed_precision() -> str:
+    if os.getenv("DYNAMIC_LORA_T2I_USE_BF16", "0").strip().lower() in ("1", "true", "yes", "y"):
+        return "bf16"
+    return "fp16" if USE_FP16 else "no"
 
 
 @dataclass
@@ -48,7 +92,6 @@ class EntityDataConfig:
     entity_dir: Optional[Path] = None
 
     captions_ext: str = ".txt"
-
     image_exts: list[str] = field(default_factory=lambda: [".png", ".jpg", ".jpeg", ".webp"])
 
     width: int = DEFAULT_IMAGE_WIDTH
@@ -76,9 +119,10 @@ class TrainHyperparams:
 
     seed: int = 42
 
-    mixed_precision: str = "fp16" if USE_FP16 else "no"
+    mixed_precision: str = field(default_factory=_default_mixed_precision)
 
     max_train_steps: Optional[int] = None
+
     lr_scheduler: str = "constant"
     optimizer: str = "adamw"
 
@@ -117,16 +161,23 @@ class TrainConfig:
         self.data.entity_name = safe_entity
 
         if self.data.entity_dir is None:
-            self.data.entity_dir = (ENTITIES_DIR / safe_entity).resolve()
+            self.data.entity_dir = (Path(ENTITIES_DIR) / safe_entity).resolve()
 
         if self.output.output_dir is None:
-            self.output.output_dir = (LORA_USER_ENTITIES_DIR / safe_entity / self.output.run_name).resolve()
+            self.output.output_dir = (Path(LORA_USER_ENTITIES_DIR) / safe_entity / self.output.run_name).resolve()
 
         if self.output.results_dir is None:
-            self.output.results_dir = (EXPERIMENT_RESULTS_DIR / self.output.run_name).resolve()
+            self.output.results_dir = (Path(EXPERIMENT_RESULTS_DIR) / self.output.run_name).resolve()
 
         if self.output.logs_dir is None:
-            self.output.logs_dir = (LOGS_DIR / self.output.run_name).resolve()
+            self.output.logs_dir = (Path(LOGS_DIR) / self.output.run_name).resolve()
+
+        self.meta.setdefault("resolved_at", _now_utc_z())
+        self.meta.setdefault("device_hint", get_device())
+        if _HF_HOME is not None:
+            self.meta.setdefault("hf_home", str(_HF_HOME))
+        if _DIFFUSERS_CACHE is not None:
+            self.meta.setdefault("diffusers_cache", str(_DIFFUSERS_CACHE))
 
         return self
 
@@ -164,12 +215,27 @@ class TrainConfig:
         if self.output.output_dir is None or self.output.results_dir is None or self.output.logs_dir is None:
             raise ValueError("output dirs are None (call resolve_paths())")
 
+        if get_device() != "cuda":
+            logger.warning("Device is not CUDA. RunPod training is expected to use CUDA, got: %s", get_device())
+
+        if self.train.mixed_precision == "bf16" and get_device() == "cuda":
+            import torch
+
+            if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+                logger.warning("bf16 requested but torch reports bf16 not supported; trainer may fall back to fp16.")
+
     def prepare_dirs(self) -> None:
         self.resolve_paths()
         assert self.output.output_dir and self.output.results_dir and self.output.logs_dir
         Path(self.output.output_dir).mkdir(parents=True, exist_ok=True)
         Path(self.output.results_dir).mkdir(parents=True, exist_ok=True)
         Path(self.output.logs_dir).mkdir(parents=True, exist_ok=True)
+
+
+def _now_utc_z() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _to_serializable(obj: Any) -> Any:
@@ -230,7 +296,7 @@ def train_config_from_dict(d: dict[str, Any]) -> TrainConfig:
             learning_rate=float(train_d.get("learning_rate", DEFAULT_LEARNING_RATE)),
             warmup_steps=int(train_d.get("warmup_steps", DEFAULT_WARMUP_STEPS)),
             seed=int(train_d.get("seed", 42)),
-            mixed_precision=str(train_d.get("mixed_precision", "fp16" if USE_FP16 else "no")),
+            mixed_precision=str(train_d.get("mixed_precision", _default_mixed_precision())),
             max_train_steps=train_d.get("max_train_steps", None),
             lr_scheduler=str(train_d.get("lr_scheduler", "constant")),
             optimizer=str(train_d.get("optimizer", "adamw")),
@@ -282,11 +348,16 @@ def save_train_config(cfg: TrainConfig, path: Path) -> None:
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        cfg.resolve_paths()
+    except Exception:
+        pass
+
     d = train_config_to_dict(cfg)
 
     if _is_yaml(path):
         try:
-            import yaml  # type: ignore
+            import yaml
         except ImportError as e:
             raise ImportError("PyYAML is required to save .yaml/.yml configs. Install: pip install pyyaml") from e
         path.write_text(yaml.safe_dump(d, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -311,7 +382,11 @@ def init_config_file(out_path: Path, *, entity_name: str, token: str) -> None:
 
 def main() -> None:
     import argparse
-    from src.dynamic_lora_t2i.config import setup_logging
+
+    try:
+        from src.dynamic_lora_t2i.config import setup_logging
+    except Exception:  # pragma: no cover
+        from src.dynamic_lora_t2i.utils.config import setup_logging  # type: ignore
 
     setup_logging()
 
