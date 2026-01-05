@@ -28,15 +28,20 @@ from src.dynamic_lora_t2i.training.configs import (
     save_train_config,
     train_config_to_dict,
 )
+from src.dynamic_lora_t2i.training.training_log import (
+    atomic_write_json,
+    append_epoch,
+    append_step,
+    finalize_training_log,
+    init_training_log,
+)
+
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTS_DEFAULT = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-# -----------------------------
-# Dataset
-# -----------------------------
 class EntityCaptionDataset(Dataset):
     def __init__(
         self,
@@ -86,16 +91,14 @@ class EntityCaptionDataset(Dataset):
             if txt:
                 return txt
 
-        # fallback — мінімально придатний caption
         return f"photo of {self.placeholder_token}"
 
     def _pil_to_tensor_manual(self, img: Image.Image) -> torch.Tensor:
-        # resize -> (H,W) and normalize to [-1, 1]
         img = img.resize((self.width, self.height), resample=Image.BICUBIC)
-        arr = torch.from_numpy(__import__("numpy").array(img)).float() / 255.0  # (H,W,C)
+        arr = torch.from_numpy(__import__("numpy").array(img)).float() / 255.0
         if arr.ndim == 2:
             arr = arr.unsqueeze(-1)
-        arr = arr.permute(2, 0, 1)  # (C,H,W)
+        arr = arr.permute(2, 0, 1)
         if arr.shape[0] == 1:
             arr = arr.repeat(3, 1, 1)
         arr = (arr - 0.5) / 0.5
@@ -114,7 +117,6 @@ class EntityCaptionDataset(Dataset):
                 ]
             )
             return tfm(img)
-        # manual path (requires numpy)
         return self._pil_to_tensor_manual(img)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
@@ -136,9 +138,6 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     return {"pixel_values": pixel_values, "prompts": prompts, "paths": paths}
 
 
-# -----------------------------
-# SDXL helpers
-# -----------------------------
 def _is_mps(device: torch.device) -> bool:
     return device.type == "mps"
 
@@ -150,16 +149,11 @@ def _pick_torch_dtype(mixed_precision: str, device: torch.device) -> torch.dtype
 
 
 def _make_time_ids(batch_size: int, height: int, width: int, device: torch.device) -> torch.Tensor:
-    # SDXL expects: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
     t = torch.tensor([height, width, 0, 0, height, width], device=device, dtype=torch.float32)
     return t.unsqueeze(0).repeat(batch_size, 1)
 
 
 def _encode_prompts_sdxl(pipe: Any, prompts: list[str], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns: (prompt_embeds, pooled_prompt_embeds)
-    Handles different diffusers versions.
-    """
     if not hasattr(pipe, "encode_prompt"):
         raise RuntimeError("Pipeline has no encode_prompt(); please upgrade diffusers or use SDXL pipeline.")
 
@@ -190,12 +184,9 @@ def _try_enable_gradient_checkpointing(unet: Any) -> None:
         logger.warning("Could not enable gradient checkpointing: %s", e)
 
 
-# -----------------------------
-# LoRA
-# -----------------------------
 def add_lora_to_unet(unet: torch.nn.Module, cfg: TrainConfig) -> torch.nn.Module:
     try:
-        from peft import LoraConfig, get_peft_model  # type: ignore
+        from peft import LoraConfig, get_peft_model
     except ImportError as e:
         raise ImportError(
             "peft is required for LoRA training. Install: pip install peft"
@@ -217,9 +208,6 @@ def add_lora_to_unet(unet: torch.nn.Module, cfg: TrainConfig) -> torch.nn.Module
 
 
 def extract_lora_state_dict(unet: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """
-    Return only LoRA weights (PEFT adapter state dict if possible).
-    """
     try:
         from peft.utils import get_peft_model_state_dict  # type: ignore
 
@@ -229,7 +217,6 @@ def extract_lora_state_dict(unet: torch.nn.Module) -> dict[str, torch.Tensor]:
         sd_full = unet.state_dict()
         sd = {k: v.detach().cpu() for k, v in sd_full.items() if ("lora_" in k or ".lora" in k)}
         if not sd:
-            # last resort: save whole state dict (heavy)
             sd = {k: v.detach().cpu() for k, v in sd_full.items()}
         return sd
 
@@ -246,30 +233,26 @@ def save_lora_weights(
 
     state_dict = extract_lora_state_dict(unet)
 
-    # Try to convert to diffusers LoRA format (if available)
     try:
-        from diffusers.utils import convert_state_dict_to_diffusers  # type: ignore
+        from diffusers.utils import convert_state_dict_to_diffusers
 
         state_dict = convert_state_dict_to_diffusers(state_dict)
     except Exception:
         pass
 
-    # Prefer diffusers native saving (so you can load via pipe.load_lora_weights later)
     saved_path: Optional[Path] = None
     try:
         if hasattr(pipe, "save_lora_weights"):
             pipe.save_lora_weights(str(out_dir), unet_lora_layers=state_dict)
-            # diffusers typically writes: pytorch_lora_weights.safetensors
             cand = out_dir / "pytorch_lora_weights.safetensors"
             if cand.exists():
                 saved_path = cand
     except Exception as e:
         logger.warning("pipe.save_lora_weights failed, will fallback: %s", e)
 
-    # Fallback: save ourselves
     if saved_path is None:
         try:
-            from safetensors.torch import save_file  # type: ignore
+            from safetensors.torch import save_file
 
             saved_path = out_dir / "unet_lora.safetensors"
             save_file(state_dict, str(saved_path))
@@ -282,25 +265,21 @@ def save_lora_weights(
     return saved_path
 
 
-# -----------------------------
-# Training
-# -----------------------------
 def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     ensure_project_directories()
     cfg.resolve_paths()
     cfg.validate()
     cfg.prepare_dirs()
 
-    # Lazy imports so the script errors nicely if deps are missing
     try:
-        from accelerate import Accelerator  # type: ignore
-        from accelerate.utils import set_seed  # type: ignore
+        from accelerate import Accelerator
+        from accelerate.utils import set_seed
     except ImportError as e:
         raise ImportError("accelerate is required. Install: pip install accelerate") from e
 
     try:
-        from diffusers import StableDiffusionXLPipeline  # type: ignore
-        from diffusers.optimization import get_scheduler  # type: ignore
+        from diffusers import StableDiffusionXLPipeline
+        from diffusers.optimization import get_scheduler
     except ImportError as e:
         raise ImportError("diffusers is required. Install: pip install diffusers") from e
 
@@ -317,14 +296,17 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         mixed_precision=mp,
     )
     device = accelerator.device
+    set_seed(int(cfg.train.seed))
+
+    torch_dtype = _pick_torch_dtype(mp, device)
+    if device.type == "mps":
+        torch_dtype = torch.float32
 
     set_seed(int(cfg.train.seed))
 
-    # Save resolved config near the run outputs
     resolved_cfg_path = Path(cfg.output.output_dir) / "train_config_resolved.json"
     save_train_config(cfg, resolved_cfg_path)
 
-    # Dataset + loader
     dataset = EntityCaptionDataset(
         entity_dir=Path(cfg.data.entity_dir),
         placeholder_token=cfg.data.placeholder_token,
@@ -344,16 +326,26 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         drop_last=True,
     )
 
-    # Steps
     num_update_steps_per_epoch = math.ceil(len(train_loader) / int(cfg.train.gradient_accum_steps))
     max_train_steps = cfg.train.max_train_steps
     if max_train_steps is None:
         max_train_steps = int(cfg.train.num_epochs) * num_update_steps_per_epoch
 
-    # Model/pipeline
-    torch_dtype = _pick_torch_dtype(mp, device)
-    if device.type == "mps":
-        torch_dtype = torch.float32
+    log_path = Path(cfg.output.logs_dir) / "training_log.json"
+
+    cfg_dict = train_config_to_dict(cfg)
+
+    train_log = init_training_log(
+        cfg_dict=cfg_dict,
+        run_name=str(cfg.output.run_name),
+        entity_name=str(cfg.data.entity_name),
+        device=str(device),
+        torch_dtype=str(torch_dtype),
+        max_train_steps=int(max_train_steps),
+        num_update_steps_per_epoch=int(num_update_steps_per_epoch),
+        num_images=int(len(dataset)),
+    )
+    atomic_write_json(log_path, train_log)
 
     logger.info("Loading SDXL pipeline: %s", cfg.model.base_model_id)
 
@@ -370,7 +362,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
             use_safetensors=True,
         )
 
-    # speed/memory knobs
     try:
         pipe.enable_attention_slicing()
     except Exception:
@@ -380,11 +371,9 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Move to device
     pipe.to(device)
 
     if device.type == "mps":
-        # ensure consistent dtype everywhere
         pipe.unet.to(dtype=torch.float32)
         if getattr(pipe, "text_encoder", None) is not None:
             pipe.text_encoder.to(dtype=torch.float32)
@@ -393,7 +382,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         if getattr(pipe, "vae", None) is not None:
             pipe.vae.to(dtype=torch.float32)
 
-    # Freeze everything except LoRA
     pipe.unet.requires_grad_(False)
     if getattr(pipe, "text_encoder", None) is not None:
         pipe.text_encoder.requires_grad_(False)
@@ -402,22 +390,18 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     if getattr(pipe, "vae", None) is not None:
         pipe.vae.requires_grad_(False)
 
-    # For MPS stability: keep VAE in fp32
     if _is_mps(device) and getattr(pipe, "vae", None) is not None:
         try:
             pipe.vae.to(dtype=torch.float32)
         except Exception:
             pass
 
-    # Add LoRA on UNet
     pipe.unet = add_lora_to_unet(pipe.unet, cfg)
     _try_enable_gradient_checkpointing(pipe.unet)
 
-    # Optimizer
     params_to_optimize = [p for p in pipe.unet.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params_to_optimize, lr=float(cfg.train.learning_rate))
 
-    # LR scheduler
     lr_scheduler = get_scheduler(
         name=str(cfg.train.lr_scheduler),
         optimizer=optimizer,
@@ -425,16 +409,13 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         num_training_steps=int(max_train_steps),
     )
 
-    # Prepare with accelerator
     pipe.unet, optimizer, train_loader, lr_scheduler = accelerator.prepare(
         pipe.unet, optimizer, train_loader, lr_scheduler
     )
 
-    # Noise scheduler (from pipeline)
     noise_scheduler = pipe.scheduler
     prediction_type = getattr(noise_scheduler.config, "prediction_type", "epsilon")
 
-    # Scaling factor for latents
     scaling_factor = 0.13025
     if getattr(pipe, "vae", None) is not None:
         scaling_factor = float(getattr(getattr(pipe.vae, "config", None), "scaling_factor", scaling_factor))
@@ -452,10 +433,12 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     global_step = 0
     running_loss = 0.0
 
-    # optional tqdm
+    micro_loss_sum = 0.0
+    micro_loss_count = 0
+
     pbar = None
     try:
-        from tqdm.auto import tqdm  # type: ignore
+        from tqdm.auto import tqdm
 
         pbar = tqdm(total=int(max_train_steps), disable=not accelerator.is_local_main_process)
     except Exception:
@@ -464,17 +447,21 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     pipe.unet.train()
 
     for epoch in range(int(cfg.train.num_epochs)):
+        epoch_update_steps = 0
+        epoch_loss_sum = 0.0
+        epoch_loss_last = None
+        epoch_lr_sum = 0.0
+        epoch_lr_last = None
+        epoch_lr_count = 0
         for step, batch in enumerate(train_loader):
             with accelerator.accumulate(pipe.unet):
                 pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32)
                 prompts: list[str] = batch["prompts"]
 
-                # VAE encode -> latents
                 with torch.no_grad():
                     latents = pipe.vae.encode(pixel_values).latent_dist.sample()
                     latents = latents * scaling_factor
 
-                # Sample noise + timestep
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
                 timesteps = torch.randint(
@@ -487,7 +474,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
 
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Text embeddings (SDXL)
                 with torch.no_grad():
                     prompt_embeds, pooled_prompt_embeds = _encode_prompts_sdxl(pipe, prompts, device=device)
 
@@ -498,7 +484,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
                 time_ids = _make_time_ids(bsz, int(cfg.data.height), int(cfg.data.width), device=device)
                 added_cond_kwargs = {"text_embeds": pooled_prompt_embeds, "time_ids": time_ids}
 
-                # Predict noise
                 model_out = pipe.unet(
                     noisy_latents,
                     timesteps,
@@ -516,22 +501,64 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
+                micro_loss_sum += float(loss.detach().item())
+                micro_loss_count += 1
+
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            # logging
             if accelerator.sync_gradients:
+                update_loss = micro_loss_sum / max(1, micro_loss_count)
+                micro_loss_sum = 0.0
+                micro_loss_count = 0
+
                 global_step += 1
-                running_loss += float(loss.detach().item())
+                running_loss += float(update_loss)
+
+                lr_val = _get_lr(optimizer)
+
+                epoch_update_steps += 1
+                epoch_loss_sum += float(update_loss)
+                epoch_loss_last = float(update_loss)
+
+                if lr_val is not None:
+                    epoch_lr_sum += float(lr_val)
+                    epoch_lr_last = float(lr_val)
+                    epoch_lr_count += 1
 
                 if pbar is not None:
                     pbar.update(1)
-                    pbar.set_postfix({"loss": f"{loss.detach().item():.4f}"})
+                    pbar.set_postfix({"loss": f"{update_loss:.4f}"})
+
+                append_step(
+                    train_log,
+                    epoch=epoch,
+                    global_step=global_step,
+                    loss=float(update_loss),
+                    lr=lr_val,
+                )
 
                 if global_step >= int(max_train_steps):
                     break
+
+                if epoch_update_steps > 0 and epoch_loss_last is not None:
+                    loss_mean = epoch_loss_sum / max(1, epoch_update_steps)
+                    lr_mean = (epoch_lr_sum / epoch_lr_count) if epoch_lr_count > 0 else None
+
+                    append_epoch(
+                        train_log,
+                        epoch=epoch,
+                        update_steps=epoch_update_steps,
+                        loss_mean=float(loss_mean),
+                        loss_last=float(epoch_loss_last),
+                        lr_mean=lr_mean,
+                        lr_last=epoch_lr_last,
+                        global_step_end=int(global_step),
+                    )
+
+                atomic_write_json(log_path, train_log)
 
         if global_step >= int(max_train_steps):
             break
@@ -542,7 +569,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     avg_loss = running_loss / max(1, global_step)
     logger.info("Training finished. steps=%d, avg_loss=%.6f", global_step, avg_loss)
 
-    # Save LoRA
     meta = {
         "entity_name": cfg.data.entity_name,
         "placeholder_token": cfg.data.placeholder_token,
@@ -555,7 +581,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     out_dir = Path(cfg.output.output_dir)
     weights_path = save_lora_weights(pipe, pipe.unet, out_dir, meta=meta)
 
-    # Optional validation image
     val_img_path = None
     if cfg.train.validation_prompt:
         try:
@@ -593,6 +618,20 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
 
     (out_dir / "training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
+
+
+def _get_lr(optimizer: Any) -> Optional[float]:
+    try:
+        return float(optimizer.param_groups[0]["lr"])
+    except Exception:
+        pass
+    try:
+        opt = getattr(optimizer, "optimizer", None)
+        if opt is not None:
+            return float(opt.param_groups[0]["lr"])
+    except Exception:
+        pass
+    return None
 
 
 def main() -> None:

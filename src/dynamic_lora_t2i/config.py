@@ -56,8 +56,8 @@ def ensure_project_directories() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-# DEFAULT_BASE_MODEL_ID = "runwayml/stable-diffusion-v1-5"
-DEFAULT_BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+DEFAULT_BASE_MODEL_ID = "runwayml/stable-diffusion-v1-5"
+# DEFAULT_BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 
 DEFAULT_REFINER_MODEL_ID = None
 
@@ -76,7 +76,7 @@ DEFAULT_WARMUP_STEPS = 0
 DEFAULT_IMAGE_WIDTH = 1024
 DEFAULT_IMAGE_HEIGHT = 1024
 
-DEFAULT_NUM_INFERENCE_STEPS = 20
+DEFAULT_NUM_INFERENCE_STEPS = 15
 DEFAULT_GUIDANCE_SCALE = 7.5
 
 
