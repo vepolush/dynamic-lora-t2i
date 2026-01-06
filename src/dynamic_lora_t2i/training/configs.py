@@ -85,6 +85,10 @@ class TrainHyperparams:
     validation_prompt: Optional[str] = None
     validation_steps: int = 0
 
+    early_stop_patience_steps: int = 0
+    early_stop_min_delta: float = 0.0
+    early_stop_warmup_steps: int = 0
+
 
 @dataclass
 class OutputConfig:
@@ -154,6 +158,15 @@ class TrainConfig:
 
         if self.train.mixed_precision not in {"fp16", "bf16", "no"}:
             raise ValueError("train.mixed_precision must be one of: fp16, bf16, no")
+
+        if self.train.early_stop_patience_steps < 0:
+            raise ValueError("train.early_stop_patience_steps must be >= 0")
+
+        if self.train.early_stop_min_delta < 0:
+            raise ValueError("train.early_stop_min_delta must be >= 0")
+
+        if self.train.early_stop_warmup_steps < 0:
+            raise ValueError("train.early_stop_warmup_steps must be >= 0")
 
         if self.data.entity_dir is None:
             raise ValueError("data.entity_dir is None (call resolve_paths())")
@@ -236,6 +249,10 @@ def train_config_from_dict(d: dict[str, Any]) -> TrainConfig:
             optimizer=str(train_d.get("optimizer", "adamw")),
             validation_prompt=train_d.get("validation_prompt", None),
             validation_steps=int(train_d.get("validation_steps", 0)),
+
+            early_stop_patience_steps=int(train_d.get("early_stop_patience_steps", 0)),
+            early_stop_min_delta=float(train_d.get("early_stop_min_delta", 0.0)),
+            early_stop_warmup_steps=int(train_d.get("early_stop_warmup_steps", 0)),
         ),
         output=OutputConfig(
             run_name=out_d.get("run_name", "run"),

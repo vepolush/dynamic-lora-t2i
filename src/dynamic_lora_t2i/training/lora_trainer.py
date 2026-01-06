@@ -302,8 +302,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
     if device.type == "mps":
         torch_dtype = torch.float32
 
-    set_seed(int(cfg.train.seed))
-
     resolved_cfg_path = Path(cfg.output.output_dir) / "train_config_resolved.json"
     save_train_config(cfg, resolved_cfg_path)
 
@@ -332,7 +330,6 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         max_train_steps = int(cfg.train.num_epochs) * num_update_steps_per_epoch
 
     log_path = Path(cfg.output.logs_dir) / "training_log.json"
-
     cfg_dict = train_config_to_dict(cfg)
 
     train_log = init_training_log(
@@ -430,144 +427,234 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         str(device),
     )
 
+    patience = int(getattr(cfg.train, "early_stop_patience_steps", 0) or 0)
+    min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0) or 0.0)
+    warmup_es = int(getattr(cfg.train, "early_stop_warmup_steps", 0) or 0)
+
+    best_loss = float("inf")
+    best_loss_step: Optional[int] = None
+    steps_wo_improve = 0
+    early_stop_triggered = False
+    early_stop_step: Optional[int] = None
+
+    train_log["metrics"]["early_stopping"] = {
+        "enabled": patience > 0,
+        "patience_steps": patience,
+        "min_delta": min_delta,
+        "warmup_steps": warmup_es,
+        "best_loss": None,
+        "best_step": None,
+        "steps_without_improve": 0,
+        "triggered": False,
+        "trigger_step": None,
+    }
+    atomic_write_json(log_path, train_log)
+
+    pbar = None
+    try:
+        from tqdm.auto import tqdm
+        pbar = tqdm(total=int(max_train_steps), disable=not accelerator.is_local_main_process)
+    except Exception:
+        pbar = None
+
     global_step = 0
     running_loss = 0.0
 
     micro_loss_sum = 0.0
     micro_loss_count = 0
 
-    pbar = None
-    try:
-        from tqdm.auto import tqdm
-
-        pbar = tqdm(total=int(max_train_steps), disable=not accelerator.is_local_main_process)
-    except Exception:
-        pbar = None
-
     pipe.unet.train()
 
-    for epoch in range(int(cfg.train.num_epochs)):
-        epoch_update_steps = 0
-        epoch_loss_sum = 0.0
-        epoch_loss_last = None
-        epoch_lr_sum = 0.0
-        epoch_lr_last = None
-        epoch_lr_count = 0
-        for step, batch in enumerate(train_loader):
-            with accelerator.accumulate(pipe.unet):
-                pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32)
-                prompts: list[str] = batch["prompts"]
+    try:
+        for epoch in range(int(cfg.train.num_epochs)):
+            epoch_update_steps = 0
+            epoch_loss_sum = 0.0
+            epoch_loss_last: Optional[float] = None
 
-                with torch.no_grad():
-                    latents = pipe.vae.encode(pixel_values).latent_dist.sample()
-                    latents = latents * scaling_factor
+            epoch_lr_sum = 0.0
+            epoch_lr_last: Optional[float] = None
+            epoch_lr_count = 0
 
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
-                timesteps = torch.randint(
-                    0,
-                    noise_scheduler.config.num_train_timesteps,
-                    (bsz,),
-                    device=latents.device,
-                    dtype=torch.int64,
-                )
+            for step, batch in enumerate(train_loader):
+                with accelerator.accumulate(pipe.unet):
+                    pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32)
+                    prompts: list[str] = batch["prompts"]
 
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                    with torch.no_grad():
+                        latents = pipe.vae.encode(pixel_values).latent_dist.sample()
+                        latents = latents * scaling_factor
 
-                with torch.no_grad():
-                    prompt_embeds, pooled_prompt_embeds = _encode_prompts_sdxl(pipe, prompts, device=device)
+                    noise = torch.randn_like(latents)
+                    bsz = latents.shape[0]
 
-                if device.type == "mps":
-                    prompt_embeds = prompt_embeds.to(dtype=torch.float32)
-                    pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=torch.float32)
-
-                time_ids = _make_time_ids(bsz, int(cfg.data.height), int(cfg.data.width), device=device)
-                added_cond_kwargs = {"text_embeds": pooled_prompt_embeds, "time_ids": time_ids}
-
-                model_out = pipe.unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs,
-                )
-                model_pred = model_out.sample if hasattr(model_out, "sample") else model_out[0]
-
-                if prediction_type == "epsilon":
-                    target = noise
-                elif prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unsupported prediction_type: {prediction_type}")
-
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-
-                micro_loss_sum += float(loss.detach().item())
-                micro_loss_count += 1
-
-                accelerator.backward(loss)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            if accelerator.sync_gradients:
-                update_loss = micro_loss_sum / max(1, micro_loss_count)
-                micro_loss_sum = 0.0
-                micro_loss_count = 0
-
-                global_step += 1
-                running_loss += float(update_loss)
-
-                lr_val = _get_lr(optimizer)
-
-                epoch_update_steps += 1
-                epoch_loss_sum += float(update_loss)
-                epoch_loss_last = float(update_loss)
-
-                if lr_val is not None:
-                    epoch_lr_sum += float(lr_val)
-                    epoch_lr_last = float(lr_val)
-                    epoch_lr_count += 1
-
-                if pbar is not None:
-                    pbar.update(1)
-                    pbar.set_postfix({"loss": f"{update_loss:.4f}"})
-
-                append_step(
-                    train_log,
-                    epoch=epoch,
-                    global_step=global_step,
-                    loss=float(update_loss),
-                    lr=lr_val,
-                )
-
-                if global_step >= int(max_train_steps):
-                    break
-
-                if epoch_update_steps > 0 and epoch_loss_last is not None:
-                    loss_mean = epoch_loss_sum / max(1, epoch_update_steps)
-                    lr_mean = (epoch_lr_sum / epoch_lr_count) if epoch_lr_count > 0 else None
-
-                    append_epoch(
-                        train_log,
-                        epoch=epoch,
-                        update_steps=epoch_update_steps,
-                        loss_mean=float(loss_mean),
-                        loss_last=float(epoch_loss_last),
-                        lr_mean=lr_mean,
-                        lr_last=epoch_lr_last,
-                        global_step_end=int(global_step),
+                    timesteps = torch.randint(
+                        0,
+                        noise_scheduler.config.num_train_timesteps,
+                        (bsz,),
+                        device=latents.device,
+                        dtype=torch.int64,
                     )
 
+                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+                    with torch.no_grad():
+                        prompt_embeds, pooled_prompt_embeds = _encode_prompts_sdxl(pipe, prompts, device=device)
+
+                    if device.type == "mps":
+                        prompt_embeds = prompt_embeds.to(dtype=torch.float32)
+                        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=torch.float32)
+
+                    time_ids = _make_time_ids(bsz, int(cfg.data.height), int(cfg.data.width), device=device)
+                    added_cond_kwargs = {"text_embeds": pooled_prompt_embeds, "time_ids": time_ids}
+
+                    model_out = pipe.unet(
+                        noisy_latents,
+                        timesteps,
+                        encoder_hidden_states=prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs,
+                    )
+                    model_pred = model_out.sample if hasattr(model_out, "sample") else model_out[0]
+
+                    if prediction_type == "epsilon":
+                        target = noise
+                    elif prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        raise ValueError(f"Unsupported prediction_type: {prediction_type}")
+
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                    micro_loss_sum += float(loss.detach().item())
+                    micro_loss_count += 1
+
+                    accelerator.backward(loss)
+
+                    if accelerator.sync_gradients:
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+                if accelerator.sync_gradients:
+                    update_loss = micro_loss_sum / max(1, micro_loss_count)
+                    micro_loss_sum = 0.0
+                    micro_loss_count = 0
+
+                    global_step += 1
+                    running_loss += float(update_loss)
+
+                    lr_val = _get_lr(optimizer)
+
+                    epoch_update_steps += 1
+                    epoch_loss_sum += float(update_loss)
+                    epoch_loss_last = float(update_loss)
+
+                    if lr_val is not None:
+                        epoch_lr_sum += float(lr_val)
+                        epoch_lr_last = float(lr_val)
+                        epoch_lr_count += 1
+
+                    if pbar is not None:
+                        pbar.update(1)
+                        pbar.set_postfix({"loss": f"{update_loss:.4f}"})
+
+                    append_step(
+                        train_log,
+                        epoch=epoch,
+                        global_step=global_step,
+                        loss=float(update_loss),
+                        lr=lr_val,
+                    )
+
+                    if patience > 0 and global_step >= warmup_es:
+                        improved = (update_loss < (best_loss - min_delta))
+                        if improved:
+                            best_loss = float(update_loss)
+                            best_loss_step = int(global_step)
+                            steps_wo_improve = 0
+                        else:
+                            steps_wo_improve += 1
+
+                        es = train_log["metrics"].get("early_stopping", {})
+                        es.update({
+                            "best_loss": None if best_loss == float("inf") else float(best_loss),
+                            "best_step": best_loss_step,
+                            "steps_without_improve": int(steps_wo_improve),
+                            "triggered": False,
+                            "trigger_step": None,
+                        })
+                        train_log["metrics"]["early_stopping"] = es
+
+                        if steps_wo_improve >= patience:
+                            early_stop_triggered = True
+                            early_stop_step = int(global_step)
+                            es.update({"triggered": True, "trigger_step": early_stop_step})
+                            train_log["metrics"]["early_stopping"] = es
+
+                            logger.info(
+                                "Early stopping: no improvement for %d update steps (best_loss=%.6f at step=%s, current=%.6f).",
+                                patience,
+                                float(best_loss) if best_loss != float("inf") else float("nan"),
+                                str(best_loss_step),
+                                float(update_loss),
+                            )
+
+                    atomic_write_json(log_path, train_log)
+
+                    if early_stop_triggered:
+                        break
+                    if global_step >= int(max_train_steps):
+                        break
+
+            if epoch_update_steps > 0 and epoch_loss_last is not None:
+                loss_mean = epoch_loss_sum / max(1, epoch_update_steps)
+                lr_mean = (epoch_lr_sum / epoch_lr_count) if epoch_lr_count > 0 else None
+
+                append_epoch(
+                    train_log,
+                    epoch=epoch,
+                    update_steps=epoch_update_steps,
+                    loss_mean=float(loss_mean),
+                    loss_last=float(epoch_loss_last),
+                    lr_mean=lr_mean,
+                    lr_last=epoch_lr_last,
+                    global_step_end=int(global_step),
+                )
                 atomic_write_json(log_path, train_log)
 
-        if global_step >= int(max_train_steps):
-            break
+            if early_stop_triggered:
+                break
+            if global_step >= int(max_train_steps):
+                break
+
+    except Exception as e:
+        finalize_training_log(
+            train_log,
+            status="failed",
+            global_step=int(global_step),
+            avg_loss=(running_loss / max(1, global_step)) if global_step > 0 else None,
+            error={"type": type(e).__name__, "message": str(e)},
+        )
+        atomic_write_json(log_path, train_log)
+        if pbar is not None:
+            pbar.close()
+        raise
 
     if pbar is not None:
         pbar.close()
 
-    avg_loss = running_loss / max(1, global_step)
-    logger.info("Training finished. steps=%d, avg_loss=%.6f", global_step, avg_loss)
+    avg_loss = (running_loss / max(1, global_step)) if global_step > 0 else None
+    status = "early_stopped" if early_stop_triggered else "completed"
+
+    finalize_training_log(
+        train_log,
+        status=status,
+        global_step=int(global_step),
+        avg_loss=float(avg_loss) if avg_loss is not None else None,
+        error=None,
+    )
+    atomic_write_json(log_path, train_log)
+
+    logger.info("Training finished. status=%s steps=%d avg_loss=%s", status, global_step, str(avg_loss))
 
     meta = {
         "entity_name": cfg.data.entity_name,
@@ -575,11 +662,17 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
         "base_model_id": cfg.model.base_model_id,
         "global_step": global_step,
         "avg_loss": avg_loss,
+        "early_stopped": bool(early_stop_triggered),
+        "early_stop_step": early_stop_step,
+        "best_loss": None if best_loss == float("inf") else float(best_loss),
+        "best_loss_step": best_loss_step,
         "train_config": train_config_to_dict(cfg),
     }
 
     out_dir = Path(cfg.output.output_dir)
-    weights_path = save_lora_weights(pipe, pipe.unet, out_dir, meta=meta)
+
+    unet_to_save = accelerator.unwrap_model(pipe.unet)
+    weights_path = save_lora_weights(pipe, unet_to_save, out_dir, meta=meta)
 
     val_img_path = None
     if cfg.train.validation_prompt:
@@ -607,8 +700,13 @@ def train_one_entity(cfg: TrainConfig) -> dict[str, Any]:
 
     summary = {
         "ok": True,
+        "status": status,
         "global_step": global_step,
         "avg_loss": avg_loss,
+        "early_stopped": bool(early_stop_triggered),
+        "early_stop_step": early_stop_step,
+        "best_loss": None if best_loss == float("inf") else float(best_loss),
+        "best_loss_step": best_loss_step,
         "weights_path": str(weights_path),
         "validation_image": val_img_path,
         "output_dir": str(out_dir),
