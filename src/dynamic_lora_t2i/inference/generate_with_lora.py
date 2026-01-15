@@ -94,6 +94,19 @@ def _default_out_paths(entity_name: str) -> tuple[Path, Path]:
     return base.with_suffix(".png"), base.with_suffix(".json")
 
 
+def _resolve_adapter_source_from_entity(ent: EntityConfig, default_adapter: str) -> Path:
+    s = (default_adapter or "").strip()
+    if not s:
+        raise ValueError("default_adapter is empty")
+
+    cand = Path(s).expanduser()
+    if cand.is_absolute():
+        return cand.resolve()
+
+    assert ent.adapters_dir is not None
+    return (Path(ent.adapters_dir) / cand).resolve()
+
+
 @dataclass
 class InferenceParams:
     negative_prompt: Optional[str] = None
@@ -104,7 +117,8 @@ class InferenceParams:
     width: int = DEFAULT_IMAGE_WIDTH
     height: int = DEFAULT_IMAGE_HEIGHT
 
-    lora_scale: float = 1.0
+    lora_scale: Optional[float] = None
+
     run_name: Optional[str] = None
     adapter_source: Optional[Union[str, Path]] = None
 
@@ -156,17 +170,42 @@ def generate_with_lora(
     placeholder = str(ent.placeholder_token)
     base_model_id = str(ent.model.base_model_id)
 
-    class_prompt = str((ent.meta or {}).get("class_prompt", "")).strip()
+    class_prompt = ""
+    try:
+        class_prompt = str(getattr(getattr(ent, "inference", None), "class_prompt", "") or "").strip()
+    except Exception:
+        class_prompt = ""
+    if not class_prompt:
+        class_prompt = str((ent.meta or {}).get("class_prompt", "") or "").strip()
 
     if p.adapter_source is not None:
         adapter_source = Path(p.adapter_source).expanduser().resolve()
+
     elif p.run_name is not None:
         adapter_source = (Path(ent.adapters_dir) / str(p.run_name)).resolve()
+
     else:
-        adapter_source = _find_latest_adapter_dir(Path(ent.adapters_dir))
+        default_adapter = None
+        try:
+            default_adapter = getattr(getattr(ent, "inference", None), "default_adapter", None)
+        except Exception:
+            default_adapter = None
+
+        if default_adapter:
+            adapter_source = _resolve_adapter_source_from_entity(ent, str(default_adapter))
+        else:
+            adapter_source = _find_latest_adapter_dir(Path(ent.adapters_dir))
 
     if not adapter_source.exists():
         raise FileNotFoundError(f"LoRA adapter source not found: {adapter_source}")
+
+    scale = p.lora_scale
+    if scale is None:
+        try:
+            scale = float(getattr(getattr(ent, "inference", None), "recommended_lora_scale", 1.0))
+        except Exception:
+            scale = 1.0
+    scale = float(scale)
 
     if pipe is None:
         pipe = load_base_pipeline(model_id=base_model_id)
@@ -178,7 +217,7 @@ def generate_with_lora(
             logger.warning("unload_loras() failed (ignored): %s", e)
 
     adapter_name = safe_entity
-    attach_lora(pipe, adapter_source, adapter_name=adapter_name, scale=float(p.lora_scale))
+    attach_lora(pipe, adapter_source, adapter_name=adapter_name, scale=scale)
 
     final_prompt = prompt
 
@@ -211,7 +250,7 @@ def generate_with_lora(
         "base_model_id": base_model_id,
         "adapter_name": adapter_name,
         "adapter_source": str(adapter_source),
-        "lora_scale": float(p.lora_scale),
+        "lora_scale": float(scale),
         "prompt_input": prompt,
         "prompt_final": final_prompt,
         "negative_prompt": p.negative_prompt,
@@ -259,7 +298,9 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=DEFAULT_NUM_INFERENCE_STEPS)
     ap.add_argument("--guidance", type=float, default=DEFAULT_GUIDANCE_SCALE)
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--scale", type=float, default=1.0)
+
+    ap.add_argument("--scale", type=float, default=None)
+
     ap.add_argument("--run", default=None, help="Optional run_name inside adapters_dir")
     ap.add_argument("--adapter", default=None, help="Optional explicit adapter dir or weights file")
     args = ap.parse_args()

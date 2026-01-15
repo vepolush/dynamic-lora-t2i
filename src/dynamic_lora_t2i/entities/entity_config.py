@@ -55,7 +55,6 @@ def _validate_placeholder_token(token: str) -> None:
     if " " in token:
         raise ValueError("placeholder_token must not contain spaces")
 
-    # Для простоти: дозволимо [a-zA-Z0-9_-]
     if not re.fullmatch(r"[A-Za-z0-9_\-]+", token):
         raise ValueError("placeholder_token must match: [A-Za-z0-9_-]+")
 
@@ -71,25 +70,19 @@ class EntityLoRAConfig:
     rank: int = DEFAULT_LORA_RANK
     alpha: int = DEFAULT_LORA_ALPHA
     dropout: float = DEFAULT_LORA_DROPOUT
-
-    # Якщо захочеш SDXL-специфіку: наприклад ["to_k", "to_q", "to_v", "to_out.0"]
     target_modules: Optional[list[str]] = None
 
 
 @dataclass
+class EntityInferenceConfig:
+    class_prompt: str = ""
+    default_adapter: Optional[str] = None
+    recommended_lora_scale: float = 1.0
+
+
+@dataclass
 class EntityConfig:
-    """
-    Entity-level config (стійкий, довгоживучий):
-      - хто така сутність (name/description/token)
-      - де лежать дані
-      - під яку базову модель тренуємо
-      - базові LoRA параметри (rank/alpha/dropout/target_modules)
-      - де складати LoRA-адаптери цієї сутності
-
-    Це НЕ “run config”. Run-конфіг (epochs/lr/etc) лишаємо в TrainConfig.
-    """
-
-    schema_version: int = 1
+    schema_version: int = 2
 
     name: str = "my_entity"
     description: str = ""
@@ -99,10 +92,7 @@ class EntityConfig:
     created_at: str = field(default_factory=_utc_now_z)
     updated_at: str = field(default_factory=_utc_now_z)
 
-    # Де лежить сутність (за замовчуванням data/entities/<name>)
     entity_dir: Optional[Path] = None
-
-    # Де зберігати треновані адаптери (за замовчуванням lora_adapters/user_entities/<name>/)
     adapters_dir: Optional[Path] = None
 
     captions_ext: str = ".txt"
@@ -110,6 +100,8 @@ class EntityConfig:
 
     model: EntityModelConfig = field(default_factory=EntityModelConfig)
     lora: EntityLoRAConfig = field(default_factory=EntityLoRAConfig)
+
+    inference: EntityInferenceConfig = field(default_factory=EntityInferenceConfig)
 
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -128,15 +120,12 @@ class EntityConfig:
         return self
 
     def config_path(self) -> Path:
-        """
-        Де зберігаємо entity_config.json (всередині entity_dir).
-        """
         self.resolve_paths()
         assert self.entity_dir is not None
         return Path(self.entity_dir) / "entity_config.json"
 
     def validate(self, *, strict: bool = False) -> None:
-        if self.schema_version != 1:
+        if int(self.schema_version) not in (1, 2):
             raise ValueError(f"Unsupported schema_version: {self.schema_version}")
 
         if not self.name:
@@ -157,6 +146,17 @@ class EntityConfig:
         if self.lora.dropout < 0.0 or self.lora.dropout >= 1.0:
             raise ValueError("lora.dropout must be in [0.0, 1.0)")
 
+        if self.inference is None:
+            raise ValueError("inference config is None")
+
+        scale = float(getattr(self.inference, "recommended_lora_scale", 1.0))
+        if scale < 0.0 or scale > 4.0:
+            raise ValueError("inference.recommended_lora_scale must be in [0.0, 4.0]")
+
+        da = (self.inference.default_adapter or "").strip()
+        if self.inference.default_adapter is not None and not da:
+            raise ValueError("inference.default_adapter is empty string (use null/omit or a non-empty value)")
+
         self.resolve_paths()
         assert self.entity_dir is not None
         assert self.adapters_dir is not None
@@ -165,13 +165,13 @@ class EntityConfig:
             if not Path(self.entity_dir).exists():
                 raise FileNotFoundError(f"entity_dir not found: {self.entity_dir}")
 
-            # Перевірка, що є хоч 1 зображення
-            img_count = 0
+            img_exts = {e.lower() for e in self.image_exts}
+            found = False
             for p in Path(self.entity_dir).rglob("*"):
-                if p.is_file() and p.suffix.lower() in {e.lower() for e in self.image_exts}:
-                    img_count += 1
+                if p.is_file() and p.suffix.lower() in img_exts:
+                    found = True
                     break
-            if img_count == 0:
+            if not found:
                 raise ValueError(f"No images found in entity_dir: {self.entity_dir}")
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,6 +181,19 @@ class EntityConfig:
     def from_dict(d: dict[str, Any]) -> "EntityConfig":
         model_d = d.get("model", {}) or {}
         lora_d = d.get("lora", {}) or {}
+        inf_d = d.get("inference", {}) or {}
+
+        # backward compatibility: старі проєкти могли зберігати class_prompt у meta
+        meta = dict(d.get("meta", {}) or {})
+        legacy_class_prompt = str(meta.get("class_prompt", "") or "").strip()
+
+        inf = EntityInferenceConfig(
+            class_prompt=str(inf_d.get("class_prompt", "")) if inf_d is not None else "",
+            default_adapter=(inf_d.get("default_adapter", None) if inf_d is not None else None),
+            recommended_lora_scale=float(inf_d.get("recommended_lora_scale", 1.0)) if inf_d is not None else 1.0,
+        )
+        if not inf.class_prompt and legacy_class_prompt:
+            inf.class_prompt = legacy_class_prompt
 
         cfg = EntityConfig(
             schema_version=int(d.get("schema_version", 1)),
@@ -203,7 +216,8 @@ class EntityConfig:
                 dropout=float(lora_d.get("dropout", DEFAULT_LORA_DROPOUT)),
                 target_modules=lora_d.get("target_modules", None),
             ),
-            meta=dict(d.get("meta", {}) or {}),
+            inference=inf,
+            meta=meta,
         )
         return cfg
 
@@ -229,6 +243,8 @@ class EntityConfig:
         self.resolve_paths()
         self.validate(strict=False)
 
+        self.schema_version = 2
+
         if path is None:
             path = self.config_path()
 
@@ -246,31 +262,49 @@ def init_entity_config(
     *,
     description: str = "",
     base_model_id: str = DEFAULT_BASE_MODEL_ID,
+    class_prompt: str = "",
 ) -> EntityConfig:
     cfg = EntityConfig(
+        schema_version=2,
         name=entity_name,
         description=description,
         placeholder_token=placeholder_token,
         model=EntityModelConfig(base_model_id=base_model_id, refiner_model_id=DEFAULT_REFINER_MODEL_ID),
         lora=EntityLoRAConfig(),
+        inference=EntityInferenceConfig(class_prompt=class_prompt),
     )
     cfg.resolve_paths()
     cfg.save()
     return cfg
 
 
+def set_default_adapter(
+    entity_name: str,
+    *,
+    adapter: str,
+    recommended_scale: float = 1.0,
+    class_prompt: Optional[str] = None,
+) -> Path:
+    safe = sanitize_entity_name(entity_name)
+    path = (ENTITIES_DIR / safe / "entity_config.json").resolve()
+    cfg = EntityConfig.load(path, resolve_paths=True, validate=True)
+
+    cfg.inference.default_adapter = str(adapter).strip()
+    cfg.inference.recommended_lora_scale = float(recommended_scale)
+
+    if class_prompt is not None:
+        cfg.inference.class_prompt = str(class_prompt)
+
+    return cfg.save(path)
+
+
 def main() -> None:
-    """
-    Usage:
-      python -m src.dynamic_lora_t2i.entities.entity_config init --entity my_entity --token vlad_object --desc "..."
-      python -m src.dynamic_lora_t2i.entities.entity_config check --entity my_entity
-    """
     import argparse
     from src.dynamic_lora_t2i.config import setup_logging
 
     setup_logging()
 
-    p = argparse.ArgumentParser(description="EntityConfig utilities (init/check).")
+    p = argparse.ArgumentParser(description="EntityConfig utilities (init/check/set-adapter).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="Create data/entities/<entity>/entity_config.json")
@@ -278,9 +312,16 @@ def main() -> None:
     p_init.add_argument("--token", required=True, help="Placeholder token, e.g. vlad_object")
     p_init.add_argument("--desc", default="", help="Human description")
     p_init.add_argument("--base-model", default=DEFAULT_BASE_MODEL_ID, help="Base model id")
+    p_init.add_argument("--class-prompt", default="", help="Optional class prompt (e.g. 'toy car')")
 
     p_check = sub.add_parser("check", help="Load + validate entity_config.json")
     p_check.add_argument("--entity", required=True, help="Entity name (folder in data/entities/)")
+
+    p_set = sub.add_parser("set-adapter", help="Bind default LoRA adapter + recommended scale to entity")
+    p_set.add_argument("--entity", required=True, help="Entity name (folder in data/entities/)")
+    p_set.add_argument("--adapter", required=True, help="Run name / relative path inside adapters_dir / absolute path")
+    p_set.add_argument("--scale", type=float, default=1.0, help="Recommended LoRA scale (e.g. 0.6..1.2)")
+    p_set.add_argument("--class-prompt", default=None, help="Optional override class_prompt")
 
     args = p.parse_args()
 
@@ -290,6 +331,7 @@ def main() -> None:
             placeholder_token=args.token,
             description=args.desc,
             base_model_id=args.base_model,
+            class_prompt=args.class_prompt,
         )
         print(f"OK: created {cfg.config_path()}")
         print(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2))
@@ -298,9 +340,19 @@ def main() -> None:
         safe = sanitize_entity_name(args.entity)
         path = (ENTITIES_DIR / safe / "entity_config.json").resolve()
         cfg = EntityConfig.load(path, resolve_paths=True, validate=True)
-        # strict=True якщо хочеш вимагати наявність зображень
         cfg.validate(strict=False)
         print("OK: entity config is valid")
+        print(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2))
+
+    elif args.cmd == "set-adapter":
+        saved = set_default_adapter(
+            entity_name=args.entity,
+            adapter=args.adapter,
+            recommended_scale=float(args.scale),
+            class_prompt=args.class_prompt,
+        )
+        print(f"OK: updated {saved}")
+        cfg = EntityConfig.load(saved, resolve_paths=True, validate=True)
         print(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2))
 
 
