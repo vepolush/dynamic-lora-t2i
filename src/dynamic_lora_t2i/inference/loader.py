@@ -1,6 +1,5 @@
 # src/dynamic_lora_t2i/inference/loader.py
 
-
 from __future__ import annotations
 
 import logging
@@ -159,15 +158,40 @@ def attach_lora(
     adapter_name: str,
     scale: float = 1.0,
 ) -> str:
+    from pathlib import Path
+
     lora_dir, weight_name = _discover_lora_dir_and_weight_name(lora_source)
 
     if not hasattr(pipe, "load_lora_weights"):
         raise RuntimeError("This pipeline does not support LoRA loading (no load_lora_weights).")
 
-    logger.info("Loading LoRA: name=%s source=%s weight_name=%s scale=%s", adapter_name, lora_dir, weight_name, scale)
+    if float(scale) <= 0.0:
+        logger.info(
+            "LoRA scale <= 0.0, skipping LoRA load: name=%s source=%s weight_name=%s scale=%s",
+            adapter_name,
+            lora_dir,
+            weight_name,
+            scale,
+        )
+        return adapter_name
 
     try:
-        # modern diffusers
+        from src.dynamic_lora_t2i.utils.lora_io import ensure_compatible_lora_weights
+
+        desired = weight_name or "pytorch_lora_weights.safetensors"
+        weight_name = ensure_compatible_lora_weights(Path(lora_dir), desired)
+    except Exception as e:
+        logger.warning("LoRA auto-fix skipped/failed (%s). Proceeding with original weights.", repr(e))
+
+    logger.info(
+        "Loading LoRA: name=%s source=%s weight_name=%s scale=%s",
+        adapter_name,
+        lora_dir,
+        weight_name,
+        scale,
+    )
+
+    try:
         if weight_name is not None:
             pipe.load_lora_weights(str(lora_dir), weight_name=weight_name, adapter_name=adapter_name)
         else:
@@ -178,13 +202,17 @@ def attach_lora(
         else:
             pipe.load_lora_weights(str(lora_dir))
 
+    scale_f = float(scale)
     try:
-        pipe.set_adapters([adapter_name], adapter_weights=[scale])
+        pipe.set_adapters([adapter_name], adapter_weights=[scale_f])
     except TypeError:
-        pipe.set_adapters(adapter_name)
-        pipe.set_adapters([adapter_name], adapter_weights=[scale])
+        try:
+            pipe.set_adapters(adapter_name)
+        except Exception:
+            pass
+        pipe.set_adapters([adapter_name], adapter_weights=[scale_f])
 
-    _try_set_adapter_scale(pipe, adapter_name=adapter_name, scale=scale)
+    _try_set_adapter_scale(pipe, adapter_name=adapter_name, scale=scale_f)
 
     return adapter_name
 
