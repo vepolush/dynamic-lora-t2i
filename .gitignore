@@ -3,16 +3,11 @@
 .venv/
 *.pyc
 
-my_entity_lora_v1
-
 # user uploaded entities
 data/entities/
 
 # experiments
 experiments
-
-# entities
-lora_adapters/user_entities
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "created_at": "2026-01-06T01:01:03.324989Z",
+  "finished_at": "2026-01-06T01:02:11.726910Z",
+  "duration_sec": 68.3880078792572,
+  "run": {
+    "run_name": "my_entity_lora_v1",
+    "entity_name": "my_entity",
+    "device": "mps",
+    "torch_dtype": "torch.float32",
+    "num_images": 20,
+    "num_update_steps_per_epoch": 20,
+    "max_train_steps": 20
+  },
+  "hyperparams": {
+    "train_config": {
+      "schema_version": 1,
+      "model": {
+        "base_model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+        "refiner_model_id": null
+      },
+      "data": {
+        "entity_name": "my_entity",
+        "placeholder_token": "vlad_object",
+        "entity_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/data/entities/my_entity",
+        "captions_ext": ".txt",
+        "image_exts": [
+          ".png",
+          ".jpg",
+          ".jpeg",
+          ".webp"
+        ],
+        "width": 1024,
+        "height": 1024,
+        "max_images": null
+      },
+      "lora": {
+        "rank": 16,
+        "alpha": 16,
+        "dropout": 0.0,
+        "target_modules": null
+      },
+      "train": {
+        "num_epochs": 1,
+        "train_batch_size": 1,
+        "gradient_accum_steps": 1,
+        "learning_rate": 0.0001,
+        "warmup_steps": 0,
+        "seed": 42,
+        "mixed_precision": "no",
+        "max_train_steps": null,
+        "lr_scheduler": "constant",
+        "optimizer": "adamw",
+        "validation_prompt": "photo of vlad_object car",
+        "validation_steps": 0,
+        "early_stop_patience_steps": 0,
+        "early_stop_min_delta": 0.0,
+        "early_stop_warmup_steps": 0
+      },
+      "output": {
+        "run_name": "my_entity_lora_v1",
+        "output_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/lora_adapters/user_entities/my_entity/my_entity_lora_v1",
+        "results_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/experiments/results/my_entity_lora_v1",
+        "logs_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/logs/my_entity_lora_v1",
+        "save_every_n_steps": 0
+      },
+      "meta": {}
+    }
+  },
+  "metrics": {
+    "global_step": 20,
+    "avg_loss": 0.5609609961509705,
+    "epochs": [
+      {
+        "epoch": 0,
+        "update_steps": 20,
+        "loss_mean": 0.5609609961509705,
+        "loss_last": 0.1885845959186554,
+        "lr_mean": 0.00010000000000000002,
+        "lr_last": 0.0001,
+        "global_step_end": 20
+      }
+    ],
+    "step_history": [
+      {
+        "ts": "2026-01-06T01:01:09.221127Z",
+        "epoch": 0,
+        "global_step": 1,
+        "loss": 0.306290864944458,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:12.147986Z",
+        "epoch": 0,
+        "global_step": 2,
+        "loss": 1.2774207592010498,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:15.190084Z",
+        "epoch": 0,
+        "global_step": 3,
+        "loss": 0.29684215784072876,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:18.334858Z",
+        "epoch": 0,
+        "global_step": 4,
+        "loss": 0.32501184940338135,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:21.543408Z",
+        "epoch": 0,
+        "global_step": 5,
+        "loss": 0.7088095545768738,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:24.806121Z",
+        "epoch": 0,
+        "global_step": 6,
+        "loss": 0.3244307339191437,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:28.088283Z",
+        "epoch": 0,
+        "global_step": 7,
+        "loss": 0.5612019300460815,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:31.370015Z",
+        "epoch": 0,
+        "global_step": 8,
+        "loss": 0.2886908948421478,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:34.680762Z",
+        "epoch": 0,
+        "global_step": 9,
+        "loss": 0.6980776190757751,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:37.994559Z",
+        "epoch": 0,
+        "global_step": 10,
+        "loss": 1.1530752182006836,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:41.330071Z",
+        "epoch": 0,
+        "global_step": 11,
+        "loss": 0.9547309875488281,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:44.671796Z",
+        "epoch": 0,
+        "global_step": 12,
+        "loss": 1.0079612731933594,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:48.019924Z",
+        "epoch": 0,
+        "global_step": 13,
+        "loss": 0.32278960943222046,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:51.378172Z",
+        "epoch": 0,
+        "global_step": 14,
+        "loss": 0.3239448368549347,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:54.767350Z",
+        "epoch": 0,
+        "global_step": 15,
+        "loss": 0.16368749737739563,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:01:58.169347Z",
+        "epoch": 0,
+        "global_step": 16,
+        "loss": 0.27529430389404297,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:02:01.553193Z",
+        "epoch": 0,
+        "global_step": 17,
+        "loss": 1.040222406387329,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:02:04.954478Z",
+        "epoch": 0,
+        "global_step": 18,
+        "loss": 0.6927741765975952,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:02:08.337652Z",
+        "epoch": 0,
+        "global_step": 19,
+        "loss": 0.30937865376472473,
+        "lr": 0.0001
+      },
+      {
+        "ts": "2026-01-06T01:02:11.725962Z",
+        "epoch": 0,
+        "global_step": 20,
+        "loss": 0.1885845959186554,
+        "lr": 0.0001
+      }
+    ],
+    "step_history_truncated": false,
+    "early_stopping": {
+      "enabled": false,
+      "patience_steps": 0,
+      "min_delta": 0.0,
+      "warmup_steps": 0,
+      "best_loss": null,
+      "best_step": null,
+      "steps_without_improve": 0,
+      "triggered": false,
+      "trigger_step": null
+    }
+  },
+  "environment": {
+    "python": "3.11.9",
+    "platform": "macOS-15.7.2-arm64-arm-64bit",
+    "torch": "2.9.1",
+    "diffusers": "0.36.0",
+    "accelerate": "1.12.0",
+    "peft": "0.18.0",
+    "transformers": "4.57.1"
+  }
+}

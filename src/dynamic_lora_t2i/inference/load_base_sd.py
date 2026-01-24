@@ -190,7 +190,7 @@ def generate_image_cpu(
 def generate_test_image_cpu(pipe: Text2ImagePipeline) -> None:
     ensure_project_directories()
 
-    prompt = "A red car"
+    prompt = "a red race car"
     negative_prompt = "worst quality, normal quality, low quality, low res, blurry, distortion, text, watermark, logo, banner, extra digits, cropped, jpeg artifacts, signature, username, error, sketch, duplicate, ugly, monochrome, horror, geometry, mutation, disgusting, bad anatomy, bad proportions, bad quality, deformed, disconnected limbs, out of frame, out of focus, dehydrated, disfigured, extra arms, extra limbs, extra hands, fused fingers, gross proportions, long neck, jpeg, malformed limbs, mutated, mutated hands, mutated limbs, missing arms, missing fingers, picture frame, poorly drawn hands, poorly drawn face, collage, pixel, pixelated, grainy, color aberration, amputee, autograph, bad illustration, beyond the borders, blank background, body out of frame, boring background, branding, cut off, dismembered, disproportioned, distorted, draft, duplicated features, extra fingers, extra legs, fault, flaw, grains, hazy, identifying mark, improper scale, incorrect physiology, incorrect ratio, indistinct, kitsch, low resolution, macabre, malformed, mark, misshapen, missing hands, missing legs, mistake, morbid, mutilated, off-screen, outside the picture, poorly drawn feet, printed words, render, repellent, replicate, reproduce, revolting dimensions, script, shortened, sign, split image, squint, storyboard, tiling, trimmed, unfocused, unattractive, unnatural pose, unreal engine, unsightly, written language"
     out_path = EXPERIMENT_RESULTS_DIR / "test_picture.png"
     metadata_path = out_path.with_suffix(".json")
@@ -199,7 +199,7 @@ def generate_test_image_cpu(pipe: Text2ImagePipeline) -> None:
         pipe=pipe,
         prompt=prompt,
         negative_prompt=negative_prompt,
-        seed=None,
+        seed=1,
         metadata_path=metadata_path,
     )
 

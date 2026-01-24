@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "status": "completed",
+  "global_step": 20,
+  "avg_loss": 0.5609609961509705,
+  "early_stopped": false,
+  "early_stop_step": null,
+  "best_loss": null,
+  "best_loss_step": null,
+  "weights_path": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/lora_adapters/user_entities/my_entity/my_entity_lora_v1/pytorch_lora_weights.safetensors",
+  "validation_image": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/experiments/results/my_entity_lora_v1/validation.png",
+  "output_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/lora_adapters/user_entities/my_entity/my_entity_lora_v1",
+  "results_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/experiments/results/my_entity_lora_v1",
+  "logs_dir": "/Users/vepolush/PycharmProjects/dynamic-lora-t2i/logs/my_entity_lora_v1"
+}

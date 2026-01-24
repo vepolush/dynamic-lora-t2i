@@ -338,7 +338,7 @@ def main() -> None:
     p.add_argument("--scale", type=float, default=1.0, help="LoRA scale (weight)")
     p.add_argument("--prompt", required=True, help="Prompt")
     p.add_argument("--negative", default=None, help="Negative prompt")
-    p.add_argument("--steps", type=int, default=25, help="Inference steps")
+    p.add_argument("--steps", type=int, default=30, help="Inference steps")
     p.add_argument("--guidance", type=float, default=7.5, help="Guidance scale")
     p.add_argument("--seed", type=int, default=42, help="Seed")
     p.add_argument("--out", default="experiments/results/lora_smoke.png", help="Output image path")
